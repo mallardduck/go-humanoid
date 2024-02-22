@@ -1,9 +1,13 @@
 package humanoid_go
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"os"
+	"slices"
 	"strings"
 )
 
@@ -30,66 +34,119 @@ type SymmetricObfuscatorInterface interface {
 }
 
 type HumanoID struct {
-	wordSetData map[string]map[int]string
-	categories  map[string]int
+	wordSetData map[string][]string
+	categories  []string
 	lookup      map[string]LookupMap
 	separator   string
 	format      WordFormatOption
 	obfuscator  SymmetricObfuscatorInterface
 }
 
-type HumanoIDOption func(h *HumanoID)
+type HumanoIDOption func(h *HumanoID) error
 
-func WithCategories(categories map[int]string) HumanoIDOption {
-	return func(h *HumanoID) {
+func WithCategories(categories []string) HumanoIDOption {
+	return func(h *HumanoID) error {
+		// TODO: figure out how to be less sad about golan lacking exceptions right here.
+		// Ideally this would be where the category input checking code is.
 		h.categories = categories
+		return nil
 	}
 }
 
 func WithSeparator(separator string) HumanoIDOption {
-	return func(h *HumanoID) {
+	return func(h *HumanoID) error {
 		h.separator = separator
+		return nil
 	}
 }
 
 func WithFormat(format WordFormatOption) HumanoIDOption {
-	return func(h *HumanoID) {
+	return func(h *HumanoID) error {
 		h.format = format
+		return nil
 	}
 }
 
 func WithObfuscator(obfuscator SymmetricObfuscatorInterface) HumanoIDOption {
-	return func(h *HumanoID) {
+	return func(h *HumanoID) error {
 		h.obfuscator = obfuscator
+		return nil
 	}
 }
 
 func NewHumanoID(
-	wordSets map[string]map[int]string,
-	opts ...HumanoIDOption,
+	wordSets map[string][]string,
+	options ...HumanoIDOption,
 ) (HumanoID, error) {
-	if len(wordSets) == 0 {
-		return _, errors.New("no WordSets provided")
-	}
-
-	// TODO: figure out how to make opts do the things under this..
-
 	humanoid := HumanoID{}
+	if len(wordSets) == 0 {
+		return humanoid, errors.New("no WordSets provided")
+	}
+
 	humanoid.wordSetData = wordSets
-
-	catKeys := make(map[int]string, len(wordSets))
-	for k, _ := range wordSets {
-		catKeys = append(catKeys, k)
-	}
-	humanoid.categories = catKeys
-
-	for _, categoryName := range categories {
-		// TODO: construct initial look up map
-	}
-	humanoid.separator = separator
-	humanoid.format = format
+	humanoid.categories = make([]string, 0)
+	humanoid.lookup = make(map[string]LookupMap)
+	humanoid.separator = "-"
 	humanoid.obfuscator = NOPObfuscator{}
-	return humanoid
+	// TODO: figure out how to check for categories
+	for _, option := range options {
+		err := option(&humanoid)
+		if err != nil {
+			return humanoid, err
+		}
+	}
+	// Assume we need to setup categories
+	if options == nil {
+		categoryKeys := make([]string, 0)
+		for k, _ := range humanoid.wordSetData {
+			categoryKeys = append(categoryKeys, k)
+		}
+		humanoid.categories = categoryKeys
+	}
+
+	// Build initial lookup table
+	// TODO: be aware of a bug if people give custom categories with repeats
+	for _, categoryName := range humanoid.categories {
+		if len(categoryName) == 0 {
+			return humanoid, errors.New(fmt.Sprintf("Category `%s` is invalid", categoryName))
+		}
+		// TODO: Do the category check and error next
+
+		// Ensure unique and normalized values
+		for k, val := range humanoid.wordSetData[categoryName] {
+			humanoid.wordSetData[categoryName][k] = strings.ToLower(Trim(val))
+		}
+		humanoid.wordSetData[categoryName] = uniqueSlice(humanoid.wordSetData[categoryName])
+
+		humanoid.lookup[categoryName] = make(LookupMap)
+		for w, i := range sliceToFlippedMap(humanoid.wordSetData[categoryName]) {
+			humanoid._addLookup(categoryName, w, i)
+		}
+	}
+
+	return humanoid, nil
+}
+
+func uniqueSlice(slice []string) []string {
+	encountered := map[string]bool{}
+	result := make([]string, 0)
+
+	for _, v := range slice {
+		if encountered[v] == false {
+			encountered[v] = true
+			result = append(result, v)
+		}
+	}
+
+	return result
+}
+
+func sliceToFlippedMap(mapIn []string) map[string]int {
+	newMap := make(map[string]int)
+	for k, v := range mapIn {
+		newMap[v] = k
+	}
+	return newMap
 }
 
 func (h *HumanoID) Create(id int) (string, error) {
@@ -97,19 +154,22 @@ func (h *HumanoID) Create(id int) (string, error) {
 		return "", errors.New("the input ID must be a positive integer")
 	}
 
+	// Initialize value to id value
 	value := h.obfuscator.Obfuscate(id)
+	// Start at last category
 	categoryIndex := len(h.categories) - 1
-	result := make(map[int]string)
+	// Array of words we calculated
+	result := make([]string, 0)
+	// Get radix
 	radix := len(h.wordSetData[h.categories[categoryIndex]])
 
 	for {
 		// Determine word for this category
-		result = append(result, h._formatWord(categoryIndex, value % radix))
+		result = append(result, h._formatWord(h._getWord(categoryIndex, value%radix)))
 		// Calculate new value
-		// Todo: make this an in
 		value = value / radix
 		// Next category (going from highest down to 0, repeating 0 if required)
-		categoryIndex = math.Max(--categoryIndex, 0)
+		categoryIndex = Max(categoryIndex-1, 0)
 		// Get radix
 		radix = len(h.wordSetData[h.categories[categoryIndex]])
 
@@ -119,12 +179,23 @@ func (h *HumanoID) Create(id int) (string, error) {
 		}
 	}
 
-	// TODO: reverse results
-	return strings.Join(result, h.separator), _
+	slices.Reverse(result)
+	return strings.Join(result, h.separator), nil
+}
+
+func Max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func Trim(text string) string {
+	return strings.Trim(text, " \n\r\t\v\x00")
 }
 
 func (h *HumanoID) Parse(text string) (int, error) {
-	value := strings.ToLower(strings.Trim(text, " \n\r\t\v\x00"))
+	value := strings.ToLower(Trim(text))
 	if len(value) == 0 {
 		return math.MinInt, errors.New("no text specified")
 	}
@@ -136,19 +207,19 @@ func (h *HumanoID) Parse(text string) (int, error) {
 	// TODO: PHP does a try/catch here, go no got
 	for {
 		// Find the index of the word
-		wordIndex, err := h._lookupWordIndex(h.categories[catIndex], value)
+		wordIndex, _ := h._lookupWordIndex(h.categories[catIndex], value)
 		// Add the index * step to the calculated result
-		result += (wordIndex * step)
+		result += wordIndex * step
 		// increase step size
-		step *= h.wordSetData[h.categories][catIndex]
+		step *= len(h.wordSetData[h.categories[catIndex]])
 		// strip found word from text
 		// substr($value, 0, -(strlen($this->getWord($catIndex, $ix)) + strlen($this->separator)));
 		substrEnd := len(h._getWord(catIndex, wordIndex)) + len(h.separator)
 		value = value[:substrEnd]
-		catIndex = math.Max(--catIndex, 0)
+		catIndex = Max(catIndex-1, 0)
 
 		// LEAVE AT END: replicate "while (value)" in PHP
-		if value == nil {
+		if value == "" {
 			break
 		}
 	}
@@ -178,17 +249,15 @@ func (h *HumanoID) _formatWord(word string) string {
 
 func (h *HumanoID) _lookupWordIndex(category string, word string) (int, error) {
 	p := h.lookup[category]
-	var lastIndex int
-	for i, character := range word {
-		_, err := p[character]
-		if err {
+	var lastIndex *int
+	for _, character := range word {
+		if p[string(character)] == nil {
 			break
 		}
 
-		p := &p[character]
-		_, err := p[LookupIndexPlaceholder]
-		if !err {
-			lastIndex = p[LookupIndexPlaceholder]
+		p := p[string(character)].(LookupMap)
+		if index, ok := p[LookupIndexPlaceholder].(*int); ok {
+			lastIndex = index
 		}
 	}
 
@@ -196,17 +265,17 @@ func (h *HumanoID) _lookupWordIndex(category string, word string) (int, error) {
 		return math.MinInt, errors.New(fmt.Sprintf("Failed to lookup `%s`", word))
 	}
 
-	return lastIndex, nil
+	return *lastIndex, nil
 }
 
 func (h *HumanoID) _addLookup(category string, word string, index int) {
 	p := h.lookup[category]
-	for i, c := range word {
-		_, err := p[c]
-		if err {
-			p[c] = make(LookupMap)
+	for _, character := range word {
+		if p[string(character)] == nil {
+			p[string(character)] = make(LookupMap)
+			// TODO: probably have to manually save things back to HumanoID?
 		}
-		p = &p[c]
+		p = p[string(character)].(LookupMap)
 	}
 
 	p[LookupIndexPlaceholder] = index
@@ -232,4 +301,20 @@ func (O BasicShiftObfuscator) Obfuscate(id int) int {
 
 func (O BasicShiftObfuscator) Deobfuscate(id int) int {
 	return id ^ O.salt
+}
+
+func SpaceIdGenerator(
+	options ...HumanoIDOption,
+) (HumanoIDInterface, error) {
+	var wordSet map[string][]string
+	jsonfile, _ := os.Open("./data/space-words.json")
+	defer jsonfile.Close()
+	dat, _ := io.ReadAll(jsonfile)
+
+	_ = json.Unmarshal([]byte(dat), &wordSet)
+	humanoid, err := NewHumanoID(
+		wordSet,
+		options...,
+	)
+	return &humanoid, err
 }
