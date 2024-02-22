@@ -6,6 +6,11 @@ import (
 )
 
 func TestSpaceIdGenerator(t *testing.T) {
+	categories := make([]string, 4)
+	categories[0] = "colors"
+	categories[1] = "buzzwords"
+	categories[2] = "life-cycle"
+	categories[3] = "star-taxonomy"
 	spaceHumanoid, err := SpaceIdGenerator()
 	assert.NoError(t, err)
 

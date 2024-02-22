@@ -16,7 +16,7 @@ type WordFormatOption int
 type LookupMap map[any]any
 
 const (
-	LookupIndexPlaceholder                  = 0
+	LookupIndexPlaceholder                  = iota
 	UpperCaseFirst         WordFormatOption = iota
 	LowerCaseFirst
 	UpperCase
@@ -46,8 +46,9 @@ type HumanoIDOption func(h *HumanoID) error
 
 func WithCategories(categories []string) HumanoIDOption {
 	return func(h *HumanoID) error {
-		// TODO: figure out how to be less sad about golan lacking exceptions right here.
-		// Ideally this would be where the category input checking code is.
+		if len(categories) == 0 {
+			return errors.New("categories cannot be empty - remove `WithCategories` call and use autodetect instead")
+		}
 		h.categories = categories
 		return nil
 	}
@@ -95,11 +96,13 @@ func NewHumanoID(
 			return humanoid, err
 		}
 	}
-	// Assume we need to setup categories
-	if options == nil {
-		categoryKeys := make([]string, 0)
+	// Assume we need to set up categories
+	if options == nil && len(humanoid.categories) == 0 {
+		categoryKeys := make([]string, len(humanoid.wordSetData))
+		i := 0
 		for k, _ := range humanoid.wordSetData {
-			categoryKeys = append(categoryKeys, k)
+			categoryKeys[i] = k
+			i = i + 1
 		}
 		humanoid.categories = categoryKeys
 	}
